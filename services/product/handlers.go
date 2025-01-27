@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
@@ -67,11 +70,35 @@ func CreateProduct(db *gorm.DB) gin.HandlerFunc {
 func GetProduct(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		var product Product
-		if err := db.First(&product, "id = ?", id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
+
+		// Validate UUID format
+		if _, err := uuid.Parse(id); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid product ID format",
+				"details": "Product ID must be in UUID format",
+				"code":    "INVALID_PRODUCT_ID",
+			})
 			return
 		}
+
+		var product Product
+		if err := db.First(&product, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error":   "Product not found",
+					"details": fmt.Sprintf("Product with ID %s not found", id),
+					"code":    "PRODUCT_NOT_FOUND",
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to fetch product",
+				"details": "An internal error occurred",
+				"code":    "FETCH_PRODUCT_FAILED",
+			})
+			return
+		}
+
 		c.JSON(http.StatusOK, product)
 	}
 }
@@ -80,9 +107,32 @@ func GetProduct(db *gorm.DB) gin.HandlerFunc {
 func UpdateProduct(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
+
+		// Validate UUID format
+		if _, err := uuid.Parse(id); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid product ID format",
+				"details": "Product ID must be in UUID format",
+				"code":    "INVALID_PRODUCT_ID",
+			})
+			return
+		}
+
 		var product Product
 		if err := db.First(&product, "id = ?", id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error":   "Product not found",
+					"details": fmt.Sprintf("Product with ID %s not found", id),
+					"code":    "PRODUCT_NOT_FOUND",
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to fetch product",
+				"details": "An internal error occurred",
+				"code":    "FETCH_PRODUCT_FAILED",
+			})
 			return
 		}
 
@@ -106,10 +156,34 @@ func UpdateProduct(db *gorm.DB) gin.HandlerFunc {
 func DeleteProduct(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		if err := db.Delete(&Product{}, "id = ?", id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+		// Validate UUID format
+		if _, err := uuid.Parse(id); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid product ID format",
+				"details": "Product ID must be in UUID format",
+				"code":    "INVALID_PRODUCT_ID",
+			})
 			return
 		}
+
+		if err := db.Delete(&Product{}, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error":   "Product not found",
+					"details": fmt.Sprintf("Product with ID %s not found", id),
+					"code":    "PRODUCT_NOT_FOUND",
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to delete product",
+				"details": "An internal error occurred",
+				"code":    "DELETE_PRODUCT_FAILED",
+			})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{"message": "Product deleted"})
 	}
 }

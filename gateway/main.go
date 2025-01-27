@@ -10,13 +10,36 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/hashicorp/consul/api"
 	"github.com/joho/godotenv"
 )
+
+// validateUUID middleware checks if the :id parameter is a valid UUID
+func validateUUID(errorCode string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		if id == "" {
+			c.Next()
+			return
+		}
+
+		if _, err := uuid.Parse(id); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid ID format",
+				"details": "ID must be in UUID format",
+				"code":    errorCode,
+			})
+			return
+		}
+		c.Next()
+	}
+}
 
 func main() {
 	// Load environment variables from .env file
@@ -55,7 +78,7 @@ func main() {
 	registration.Port = port                     // API Gateway port
 	registration.Address = os.Getenv("HOST_IP")  // Host IP or network interface
 	registration.Check = &api.AgentServiceCheck{ // Simple health check
-		HTTP:     fmt.Sprintf("http://%s:%d/health", registration.Address, registration.Port),
+		HTTP:     fmt.Sprintf("http://gateway:%d/health", registration.Port),
 		Interval: "10s",
 		Timeout:  "1s",
 	}
@@ -79,23 +102,64 @@ func main() {
 		// Product routes
 		products := v1.Group("/products")
 		{
-			products.Any("", proxyToService(consulClient, "product-service", "/api/v1/products"))
-			products.Any("/*path", proxyToService(consulClient, "product-service", "/api/v1/products"))
+			products.GET("", proxyToService(consulClient, "product-service", "/api/v1/products"))
+			products.POST("", proxyToService(consulClient, "product-service", "/api/v1/products"))
+			products.GET("/:id", validateUUID("INVALID_PRODUCT_ID"), proxyToService(consulClient, "product-service", "/api/v1/products/:id"))
+			products.PUT("/:id", validateUUID("INVALID_PRODUCT_ID"), proxyToService(consulClient, "product-service", "/api/v1/products/:id"))
+			products.DELETE("/:id", validateUUID("INVALID_PRODUCT_ID"), proxyToService(consulClient, "product-service", "/api/v1/products/:id"))
 		}
 
-		// Order routes
+		// Order routes with UUID validation
 		orders := v1.Group("/orders")
 		{
-			orders.Any("", proxyToService(consulClient, "order-service", "/api/v1/orders"))
-			orders.Any("/*path", proxyToService(consulClient, "order-service", "/api/v1/orders"))
+			// Base endpoints
+			orders.GET("", proxyToService(consulClient, "order-service", "/api/v1/orders"))
+			orders.POST("", proxyToService(consulClient, "order-service", "/api/v1/orders"))
+
+			// Endpoints with ID parameter
+			orders.GET("/:id", validateUUID("INVALID_ORDER_ID"), proxyToService(consulClient, "order-service", "/api/v1/orders"))
+			orders.PUT("/:id", validateUUID("INVALID_ORDER_ID"), proxyToService(consulClient, "order-service", "/api/v1/orders"))
+			orders.DELETE("/:id", validateUUID("INVALID_ORDER_ID"), proxyToService(consulClient, "order-service", "/api/v1/orders"))
 		}
 
-		// User routes (placeholder)
+		// User routes
 		users := v1.Group("/users")
 		{
-			users.POST("/register", placeholderHandler("User Service - Register"))
-			users.POST("/login", placeholderHandler("User Service - Login"))
-			users.GET("/me", placeholderHandler("User Service - Profile"))
+			// Public routes
+			users.POST("/register", proxyToService(consulClient, "user-service", "/register"))
+			users.POST("/login", proxyToService(consulClient, "user-service", "/login"))
+			users.POST("/forgot-password", proxyToService(consulClient, "user-service", "/forgot-password"))
+			users.POST("/reset-password", proxyToService(consulClient, "user-service", "/reset-password"))
+
+			// Protected routes
+			users.GET("/profile", proxyToService(consulClient, "user-service", "/profile"))
+			users.PUT("/profile", proxyToService(consulClient, "user-service", "/profile"))
+			users.PUT("/profile/change-password", proxyToService(consulClient, "user-service", "/profile/change-password")) // Updated path
+			users.DELETE("/profile", proxyToService(consulClient, "user-service", "/profile"))
+
+			// Address routes
+			users.POST("/addresses", proxyToService(consulClient, "user-service", "/addresses"))
+			users.GET("/addresses", proxyToService(consulClient, "user-service", "/addresses"))
+			users.PUT("/addresses/:id", proxyToService(consulClient, "user-service", "/addresses/:id"))
+			users.DELETE("/addresses/:id", proxyToService(consulClient, "user-service", "/addresses/:id"))
+			users.PUT("/addresses/:id/default", proxyToService(consulClient, "user-service", "/addresses"))
+		}
+
+		// Inventory routes
+		inventory := v1.Group("/inventory")
+		{
+			inventory.POST("/items", proxyToService(consulClient, "inventory-service", "/api/v1/inventory/items"))
+			inventory.GET("/items", proxyToService(consulClient, "inventory-service", "/api/v1/inventory/items"))
+			inventory.GET("/items/:id", validateUUID("INVALID_INVENTORY_ID"), proxyToService(consulClient, "inventory-service", "/api/v1/inventory/items/:id"))
+			inventory.PUT("/items/:id/stock", validateUUID("INVALID_INVENTORY_ID"), proxyToService(consulClient, "inventory-service", "/api/v1/inventory/items/:id/stock"))
+			inventory.GET("/items/:id/transactions", validateUUID("INVALID_INVENTORY_ID"), proxyToService(consulClient, "inventory-service", "/api/v1/inventory/items/:id/transactions"))
+		}
+
+		// Payment routes
+		payments := v1.Group("/payments")
+		{
+			payments.POST("", proxyToService(consulClient, "payment-service", "/api/v1/payments"))
+			payments.GET("/:id", validateUUID("INVALID_PAYMENT_ID"), proxyToService(consulClient, "payment-service", "/api/v1/payments/:id"))
 		}
 	}
 
@@ -136,55 +200,66 @@ func proxyToService(consulClient *api.Client, serviceName, targetPath string) gi
 	return func(c *gin.Context) {
 		log.Printf("Incoming request to gateway: %s %s", c.Request.Method, c.Request.URL.Path)
 
-		// Discover service instances from Consul
 		services, _, err := consulClient.Health().Service(serviceName, "", true, nil)
 		if err != nil {
 			log.Printf("Error discovering service: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to discover service"})
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to discover service",
+				"code":  "SERVICE_DISCOVERY_ERROR",
+			})
 			return
 		}
 
 		if len(services) == 0 {
 			log.Printf("No healthy instances found for service: %s", serviceName)
-			c.JSON(http.StatusNotFound, gin.H{"error": "Service not found"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "Service unavailable",
+				"code":  "SERVICE_UNAVAILABLE",
+			})
 			return
 		}
 
-		// Select the first healthy service instance (implement load balancing logic here if needed)
 		service := services[0].Service
-
-		// Create a new URL for the target service
 		targetURL := &url.URL{
 			Scheme: "http",
 			Host:   fmt.Sprintf("%s:%d", service.Address, service.Port),
 		}
 
-		// Log the forwarding details
-		log.Printf("Forwarding to service: %s at %s", serviceName, targetURL.String())
-
-		// Create a reverse proxy
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-		// Modify the request director to adjust the request URL
+		originalDirector := proxy.Director
 		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
 			req.URL.Scheme = targetURL.Scheme
 			req.URL.Host = targetURL.Host
-			req.URL.Path = c.Request.URL.Path
 
-			// Retain query parameters
+			// Preserve the full path from the gateway
+			req.URL.Path = targetPath
+			// Replace :id with the actual ID value
+			if strings.Contains(targetPath, ":id") {
+				id := c.Param("id")
+				req.URL.Path = strings.ReplaceAll(req.URL.Path, ":id", id)
+			}
+
+			// Add any additional path segments from the original request
+			if c.Param("path") != "" {
+				req.URL.Path += c.Param("path")
+			}
+
 			req.URL.RawQuery = c.Request.URL.RawQuery
-
-			// Set X-Forwarded-Host header
 			req.Header.Set("X-Forwarded-Host", c.Request.Host)
+
+			log.Printf("Forwarding request to: %s %s", req.Method, req.URL.String())
 		}
 
-		// Error handling for the reverse proxy
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("Error proxying to service %s: %v", serviceName, err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to proxy to service"})
+			log.Printf("Proxy error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error":   "Failed to proxy request",
+				"code":    "PROXY_ERROR",
+				"details": err.Error(),
+			})
 		}
 
-		// Serve the request using the reverse proxy
 		proxy.ServeHTTP(c.Writer, c.Request)
 	}
 }

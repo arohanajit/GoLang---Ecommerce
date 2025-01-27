@@ -1,22 +1,39 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/hashicorp/consul/api"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres" // Changed from "postgre" to "postgres"
 	"gorm.io/gorm"
 )
+
+func validateUUID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		if id == "" {
+			c.Next()
+			return
+		}
+
+		if _, err := uuid.Parse(id); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid order ID format",
+				"details": "Order ID must be in UUID format",
+				"code":    "INVALID_ORDER_ID",
+			})
+			return
+		}
+		c.Next()
+	}
+}
 
 func main() {
 	// Load environment variables
@@ -46,12 +63,12 @@ func main() {
 	// Register Order Service with Consul
 	orderPort, _ := strconv.Atoi(os.Getenv("PORT"))
 	registration := &api.AgentServiceRegistration{
-		ID:      "order-service-" + os.Getenv("HOST_IP"),
+		ID:      "order-service",
 		Name:    "order-service",
 		Port:    orderPort,
-		Address: os.Getenv("HOST_IP"),
+		Address: "order-service",
 		Check: &api.AgentServiceCheck{
-			HTTP:                           fmt.Sprintf("http://%s:%d/health", os.Getenv("HOST_IP"), orderPort),
+			HTTP:                           fmt.Sprintf("http://order-service:%d/health", orderPort),
 			Interval:                       "10s",
 			Timeout:                        "1s",
 			DeregisterCriticalServiceAfter: "30s",
@@ -81,44 +98,17 @@ func main() {
 	{
 		v1.GET("", ListOrders(db))
 		v1.POST("", CreateOrder(db))
-		v1.GET("/:id", GetOrder(db))
-		v1.PUT("/:id", UpdateOrder(db))
-		v1.DELETE("/:id", DeleteOrder(db))
+		v1.GET("/:id", validateUUID(), GetOrder(db))
+		v1.PUT("/:id", validateUUID(), UpdateOrder(db))
+		v1.DELETE("/:id", validateUUID(), DeleteOrder(db))
 	}
 
-	// Configure server
+	// Run the server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8001"
 	}
-
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: router,
-	}
-
-	// Start server in a goroutine
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
-		}
-	}()
-
-	// Wait for interrupt signal to gracefully shutdown the server
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
-
-	// Shutdown the server with a timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
-	}
-
-	log.Println("Server exiting")
+	router.Run("0.0.0.0:" + port)
 }
 
 func initDB() (*gorm.DB, error) {

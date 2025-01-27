@@ -28,15 +28,17 @@ func initConsul() (*api.Client, error) {
 func registerService(client *api.Client) error {
 	port, _ := strconv.Atoi(os.Getenv("PORT"))
 	registration := &api.AgentServiceRegistration{
-		ID:      "user-service-" + os.Getenv("HOST_IP"),
+		ID:      "user-service",
 		Name:    "user-service",
 		Port:    port,
-		Address: os.Getenv("HOST_IP"),
+		Address: "user-service",
 		Check: &api.AgentServiceCheck{
-			HTTP:     fmt.Sprintf("http://%s:%d/health", os.Getenv("HOST_IP"), port),
-			Interval: "10s",
-			Timeout:  "1s",
+			HTTP:                           fmt.Sprintf("http://user-service:%d/health", port),
+			Interval:                       "10s",
+			Timeout:                        "1s",
+			DeregisterCriticalServiceAfter: "30s",
 		},
+		Tags: []string{"user", "api"},
 	}
 	return client.Agent().ServiceRegister(registration)
 }
@@ -97,21 +99,22 @@ func main() {
 		// Profile management
 		protected.GET("/profile", GetProfile(db))
 		protected.PUT("/profile", UpdateProfile(db))
-		protected.PUT("/profile/notifications", UpdateNotificationPreferences(db))
+		protected.PUT("/profile/change-password", ChangePassword(db)) // Changed to POST
+		protected.DELETE("/profile", DeleteAccount(db))
 
 		// Address management
 		protected.POST("/addresses", AddAddress(db))
 		protected.GET("/addresses", ListAddresses(db))
+		protected.PUT("/addresses/:id", UpdateAddress(db))
+		protected.DELETE("/addresses/:id", DeleteAddress(db))
 	}
 
-	// Start server
+	// Run the server
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8002"
 	}
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal("Failed to start server:", err)
-	}
+	r.Run("0.0.0.0:" + port)
 }
 
 func initDB() (*gorm.DB, error) {
@@ -125,20 +128,18 @@ func initDB() (*gorm.DB, error) {
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
+		return nil, err
 	}
 
-	// Test the connection
-	var user User
-	if err := db.First(&user).Error; err != nil {
-		log.Println("Database connection test failed:", err)
-	} else {
-		log.Println("Database connection successful")
-	}
+	// Drop existing tables
+	db.Migrator().DropTable(&Address{}, &User{})
 
-	// Auto migrate models
+	// Enable uuid-ossp extension
+	db.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
+
+	// Auto-migrate with new schema
 	if err := db.AutoMigrate(&User{}, &Address{}); err != nil {
-		log.Fatal("Failed to migrate database:", err)
+		return nil, err
 	}
 
 	return db, nil

@@ -1,13 +1,14 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
@@ -35,13 +36,6 @@ type UpdateProfileRequest struct {
 	PreferredLanguage string     `json:"preferred_language"`
 }
 
-type UpdateNotificationPreferencesRequest struct {
-	EmailNotifications bool `json:"email_notifications"`
-	OrderUpdates       bool `json:"order_updates"`
-	PromotionalEmails  bool `json:"promotional_emails"`
-	SecurityAlerts     bool `json:"security_alerts"`
-}
-
 type RequestPasswordResetRequest struct {
 	Email string `json:"email" binding:"required,email"`
 }
@@ -61,7 +55,12 @@ func Register(db *gorm.DB) gin.HandlerFunc {
 
 		// Check if user already exists
 		var existingUser User
-		if err := db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
+		if err := db.Where("email = ?", req.Email).First(&existingUser).Error; err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+				return
+			}
+		} else {
 			c.JSON(http.StatusConflict, gin.H{"error": "Email already registered"})
 			return
 		}
@@ -112,7 +111,7 @@ func Login(db *gorm.DB) gin.HandlerFunc {
 
 		// Create token with user ID as string
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"user_id": strconv.FormatUint(uint64(user.ID), 10),
+			"user_id": user.ID.String(),
 			"role":    user.Role,
 			"exp":     time.Now().Add(time.Hour * 24).Unix(),
 		})
@@ -150,9 +149,11 @@ func GetProfile(db *gorm.DB) gin.HandlerFunc {
 
 func UpdateProfile(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID, exists := c.Get("userID")
-		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		userID := c.GetString("user_id")
+
+		var user User
+		if err := db.First(&user, "id = ?", userID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
@@ -162,14 +163,7 @@ func UpdateProfile(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		var user User
-		if err := db.First(&user, userID).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-			return
-		}
-
-		// Update only provided fields
-		updates := make(map[string]interface{})
+		updates := map[string]interface{}{}
 		if req.FirstName != "" {
 			updates["first_name"] = req.FirstName
 		}
@@ -201,44 +195,6 @@ func UpdateProfile(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-func UpdateNotificationPreferences(db *gorm.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		userID, exists := c.Get("userID")
-		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
-			return
-		}
-
-		var req UpdateNotificationPreferencesRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		var user User
-		if err := db.First(&user, userID).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-			return
-		}
-
-		updates := NotificationPreferences{
-			EmailNotifications: req.EmailNotifications,
-			OrderUpdates:       req.OrderUpdates,
-			PromotionalEmails:  req.PromotionalEmails,
-			SecurityAlerts:     req.SecurityAlerts,
-		}
-
-		if err := db.Model(&user).Updates(map[string]interface{}{
-			"notification_preferences": updates,
-		}).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification preferences"})
-			return
-		}
-
-		c.JSON(http.StatusOK, user)
-	}
-}
-
 func AddAddress(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.GetString("user_id")
@@ -248,7 +204,12 @@ func AddAddress(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		address.UserID = userID
+		userUUID, err := uuid.Parse(userID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+		address.UserID = userUUID
 		if err := db.Create(&address).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add address"})
 			return
@@ -318,35 +279,204 @@ func ResetPassword(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Find user by reset token
 		var user User
 		if err := db.Where("password_reset_token = ?", req.Token).First(&user).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or expired reset token"})
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "Invalid reset token",
+					"code":  "INVALID_TOKEN",
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 			return
 		}
 
-		// Validate token
 		if !user.IsResetTokenValid(req.Token) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or expired reset token"})
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Token has expired",
+				"code":  "TOKEN_EXPIRED",
+			})
 			return
 		}
 
 		// Update password
 		user.Password = req.Password
 		if err := user.HashPassword(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Password hashing failed"})
 			return
 		}
 
 		// Clear reset token
 		user.ClearResetToken()
 
-		// Save changes
 		if err := db.Save(&user).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "Password has been reset successfully"})
+		c.JSON(http.StatusOK, gin.H{"message": "Password reset successful"})
+	}
+}
+
+// ChangePasswordRequest represents the request body for changing password
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required,min=8"`
+}
+
+func ChangePassword(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		var req ChangePasswordRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		var user User
+		if err := db.First(&user, "id = ?", userID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+
+		// Verify current password
+		if err := user.ComparePassword(req.CurrentPassword); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Current password is incorrect"})
+			return
+		}
+
+		// Update password
+		user.Password = req.NewPassword
+		if err := user.HashPassword(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+			return
+		}
+
+		if err := db.Save(&user).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Password updated successfully"})
+	}
+}
+
+func UpdateAddress(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		addressID := c.Param("id")
+
+		var address Address
+		if err := db.Where("id = ? AND user_id = ?", addressID, userID).First(&address).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Address not found"})
+			return
+		}
+
+		var updatedAddress Address
+		if err := c.ShouldBindJSON(&updatedAddress); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		updates := map[string]interface{}{
+			"street":      updatedAddress.Street,
+			"city":        updatedAddress.City,
+			"state":       updatedAddress.State,
+			"country":     updatedAddress.Country,
+			"postal_code": updatedAddress.PostalCode,
+		}
+
+		if err := db.Model(&address).Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update address"})
+			return
+		}
+
+		c.JSON(http.StatusOK, address)
+	}
+}
+
+func DeleteAddress(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		addressID := c.Param("id")
+
+		result := db.Where("id = ? AND user_id = ?", addressID, userID).Delete(&Address{})
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete address"})
+			return
+		}
+		if result.RowsAffected == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Address not found"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Address deleted successfully"})
+	}
+}
+
+func DeleteAccount(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		if userID == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+			return
+		}
+
+		parsedUUID, err := uuid.Parse(userID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+			return
+		}
+
+		// Start a transaction
+		tx := db.Begin()
+		if tx.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+			return
+		}
+
+		// Find the user first to ensure they exist
+		var user User
+		if err := tx.First(&user, parsedUUID).Error; err != nil {
+			tx.Rollback()
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to find user"})
+			}
+			return
+		}
+
+		// Delete associated data with proper error handling
+		if err := tx.Where("user_id = ?", parsedUUID).Delete(&Address{}).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to delete user addresses",
+				"details": err.Error(),
+			})
+			return
+		}
+
+		// Delete the user with hard delete
+		if err := tx.Unscoped().Delete(&user).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to delete user",
+				"details": err.Error(),
+			})
+			return
+		}
+
+		// Commit the transaction
+		if err := tx.Commit().Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to commit transaction",
+				"details": err.Error(),
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Account deleted successfully"})
 	}
 }

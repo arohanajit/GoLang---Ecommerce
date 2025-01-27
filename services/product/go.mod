@@ -1,9 +1,10 @@
-module product-service
+module github.com/arohanajit/product-service
 
-go 1.23.5
+go 1.22
 
 require (
 	github.com/gin-gonic/gin v1.10.0
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/consul/api v1.31.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9

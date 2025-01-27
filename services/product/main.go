@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hashicorp/consul/api"
@@ -14,6 +15,85 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// connectWithRetry attempts to connect to the database with retries
+func connectWithRetry(dsn string, maxRetries int) (*gorm.DB, error) {
+	var db *gorm.DB
+	var err error
+
+	for i := 0; i < maxRetries; i++ {
+		log.Printf("Attempting to connect to database (attempt %d/%d)", i+1, maxRetries)
+		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+			Logger: logger.Default.LogMode(logger.Info),
+		})
+		if err == nil {
+			log.Println("Successfully connected to database")
+			return db, nil
+		}
+		log.Printf("Failed to connect to database (attempt %d/%d): %v", i+1, maxRetries, err)
+		if i < maxRetries-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("failed to connect after %d attempts: %v", maxRetries, err)
+}
+
+// setupDatabase handles database migrations and schema updates
+func setupDatabase(db *gorm.DB) error {
+	log.Println("Running database migrations...")
+
+	// Add this before AutoMigrate
+	db.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
+
+	// Check if the products table exists
+	if !db.Migrator().HasTable(&Product{}) {
+		log.Println("Products table does not exist, creating it...")
+		if err := db.AutoMigrate(&Product{}); err != nil {
+			return fmt.Errorf("failed to create products table: %v", err)
+		}
+
+		// Create the array column properly for new table
+		if err := db.Exec(`
+			DO $$ 
+			BEGIN
+				ALTER TABLE products 
+				ALTER COLUMN images SET DEFAULT '{}',
+				ALTER COLUMN images TYPE text[] USING CASE 
+					WHEN images IS NULL THEN '{}'::text[]
+					ELSE images::text[]
+				END;
+			EXCEPTION WHEN others THEN
+				NULL;
+			END $$;
+		`).Error; err != nil {
+			log.Printf("Warning: Failed to alter images column: %v", err)
+		}
+	} else {
+		// Table exists, just run migrations for any schema updates
+		if err := db.AutoMigrate(&Product{}); err != nil {
+			return fmt.Errorf("failed to migrate database: %v", err)
+		}
+	}
+
+	log.Println("Database migrations completed successfully")
+	return nil
+}
+
+func setupRouter(db *gorm.DB) *gin.Engine {
+	router := gin.Default()
+
+	// API v1 routes
+	v1 := router.Group("/api/v1")
+	{
+		v1.GET("/products", ListProducts(db))
+		v1.POST("/products", CreateProduct(db))
+		v1.GET("/products/:id", GetProduct(db))
+		v1.PUT("/products/:id", UpdateProduct(db))
+		v1.DELETE("/products/:id", DeleteProduct(db))
+	}
+
+	return router
+}
 
 func main() {
 	// Load environment variables
@@ -31,48 +111,16 @@ func main() {
 		os.Getenv("DB_PORT"),
 	)
 
-	log.Printf("Attempting to connect to database with DSN: %s", dsn)
-
-	// Connect to the database with debug logging
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info), // Add SQL query logging
-	})
+	// Connect to the database with retries
+	db, err := connectWithRetry(dsn, 5)
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
-	log.Println("Successfully connected to database")
 
-	// Add debug logging for migrations
-	log.Println("Running database migrations...")
-
-	// Drop existing table to ensure clean state
-	if err := db.Migrator().DropTable(&Product{}); err != nil {
-		log.Fatal("Failed to drop table:", err)
+	// Setup database with migrations
+	if err := setupDatabase(db); err != nil {
+		log.Fatal("Failed to setup database:", err)
 	}
-
-	// Create the table
-	if err := db.AutoMigrate(&Product{}); err != nil {
-		log.Fatal("Failed to migrate database:", err)
-	}
-
-	// Create the array column properly
-	if err := db.Exec(`
-		DO $$ 
-		BEGIN
-			ALTER TABLE products 
-			ALTER COLUMN images SET DEFAULT '{}',
-			ALTER COLUMN images TYPE text[] USING CASE 
-				WHEN images IS NULL THEN '{}'::text[]
-				ELSE images::text[]
-			END;
-		EXCEPTION WHEN others THEN
-			NULL;
-		END $$;
-	`).Error; err != nil {
-		log.Printf("Warning: Failed to alter images column: %v", err)
-	}
-
-	log.Println("Database migrations completed successfully")
 
 	// Consul client config
 	consulConfig := api.DefaultConfig()
@@ -88,12 +136,12 @@ func main() {
 	// Register Product Service with Consul
 	productPort, _ := strconv.Atoi(os.Getenv("PORT"))
 	registration := &api.AgentServiceRegistration{
-		ID:      "product-service-" + os.Getenv("HOST_IP"),
+		ID:      "product-service",
 		Name:    "product-service",
 		Port:    productPort,
-		Address: os.Getenv("HOST_IP"),
+		Address: "127.0.0.1",
 		Check: &api.AgentServiceCheck{
-			HTTP:                           fmt.Sprintf("http://%s:%d/health", os.Getenv("HOST_IP"), productPort),
+			HTTP:                           fmt.Sprintf("http://127.0.0.1:%d/health", productPort),
 			Interval:                       "10s",
 			Timeout:                        "1s",
 			DeregisterCriticalServiceAfter: "30s",
@@ -110,7 +158,7 @@ func main() {
 	defer consulClient.Agent().ServiceDeregister(registration.ID)
 
 	// Initialize Gin router
-	router := gin.Default()
+	router := setupRouter(db)
 
 	// Add this before setting up routes
 	router.Use(gin.Logger())
@@ -124,26 +172,10 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "UP"})
 	})
 
-	// Setup routes
-	v1 := router.Group("/api/v1/products")
-	{
-		v1.GET("", func(c *gin.Context) {
-			log.Printf("Handling GET request for products")
-			ListProducts(db)(c)
-		})
-		v1.POST("", func(c *gin.Context) {
-			log.Printf("Handling POST request for products")
-			CreateProduct(db)(c)
-		})
-		v1.GET("/:id", GetProduct(db))
-		v1.PUT("/:id", UpdateProduct(db))
-		v1.DELETE("/:id", DeleteProduct(db))
-	}
-
 	// Run the server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8000"
 	}
-	router.Run(":" + port)
+	router.Run("0.0.0.0:" + port)
 }
