@@ -139,9 +139,9 @@ func main() {
 		ID:      "product-service",
 		Name:    "product-service",
 		Port:    productPort,
-		Address: "127.0.0.1",
+		Address: "product-service",
 		Check: &api.AgentServiceCheck{
-			HTTP:                           fmt.Sprintf("http://127.0.0.1:%d/health", productPort),
+			HTTP:                           fmt.Sprintf("http://product-service:%d/health", productPort),
 			Interval:                       "10s",
 			Timeout:                        "1s",
 			DeregisterCriticalServiceAfter: "30s",

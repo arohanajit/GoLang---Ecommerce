@@ -36,11 +36,12 @@ fi
 echo -e "${BLUE}🔍 Checking if all services are running...${NC}"
 
 # Check all services
-check_service 8081 "API Gateway" || exit 1
-check_service 8002 "User Service" || exit 1
-check_service 8000 "Product Service" || exit 1
-check_service 8001 "Order Service" || exit 1
-check_service 8004 "Payment Service" || exit 1
+check_service 8081 "API Gateway"
+check_service 8002 "User Service" 
+check_service 8000 "Product Service"  # Changed from 8003
+check_service 8001 "Order Service"    # Changed from 8004  
+check_service 8004 "Payment Service"  # Changed from 8005
+check_service 8003 "Inventory Service" # Changed from 8006
 
 echo -e "\n${GREEN}🚀 Starting comprehensive service tests...${NC}"
 

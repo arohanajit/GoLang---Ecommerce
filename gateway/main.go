@@ -76,7 +76,7 @@ func main() {
 	registration.ID = "api-gateway"              // Unique ID for this instance
 	registration.Name = "api-gateway"            // Service name
 	registration.Port = port                     // API Gateway port
-	registration.Address = os.Getenv("HOST_IP")  // Host IP or network interface
+	registration.Address = "api-gateway"         // Host IP or network interface
 	registration.Check = &api.AgentServiceCheck{ // Simple health check
 		HTTP:     fmt.Sprintf("http://gateway:%d/health", registration.Port),
 		Interval: "10s",

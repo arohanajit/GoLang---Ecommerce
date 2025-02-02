@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arohanajit/e-commerce-platform/pkg/redis"
+	"e-commerce-platform/pkg/redis"
+
+	"github.com/arohanajit/user-service/models"
 )
 
 type UserCache struct {
@@ -16,13 +18,13 @@ func NewUserCache(redisClient *redis.Client) *UserCache {
 	return &UserCache{redisClient: redisClient}
 }
 
-func (uc *UserCache) GetUser(ctx context.Context, userID string) (*User, error) {
-	var user User
+func (uc *UserCache) GetUser(ctx context.Context, userID string) (*models.User, error) {
+	var user models.User
 	err := uc.redisClient.Get(ctx, fmt.Sprintf("user:%s", userID), &user)
 	return &user, err
 }
 
-func (uc *UserCache) SetUser(ctx context.Context, user *User) error {
+func (uc *UserCache) SetUser(ctx context.Context, user *models.User) error {
 	return uc.redisClient.Set(ctx, fmt.Sprintf("user:%s", user.ID), user, 30*time.Minute)
 }
 

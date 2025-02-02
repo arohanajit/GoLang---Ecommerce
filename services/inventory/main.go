@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hashicorp/consul/api"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -44,6 +46,23 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "UP"})
 	})
+
+	redisClient, err := redis.NewClient(
+		os.Getenv("REDIS_HOST"),
+		os.Getenv("REDIS_PORT"),
+		os.Getenv("REDIS_PASSWORD"),
+	)
+	if err != nil {
+		log.Fatal("Failed to connect to Redis:", err)
+	}
+	defer redisClient.Close()
+
+	// Initialize cache
+	cache := cache.NewServiceCache(redisClient) // Use appropriate constructor for each service
+
+	// Add rate limiting
+	rateLimiter := middleware.NewRateLimiter(redisClient, 100, time.Minute)
+	router.Use(rateLimiter.Middleware())
 
 	// API routes
 	v1 := r.Group("/api/v1/inventory")

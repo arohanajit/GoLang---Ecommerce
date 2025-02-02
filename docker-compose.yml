@@ -23,8 +23,12 @@ services:
       - "8500:8500"
 
   user-service:
+    container_name: user-service
     build: ./services/user
+    ports:
+      - "8002:8002"
     environment:
+      - HOST=user-service
       - DB_HOST=postgres
       - CONSUL_HTTP_ADDR=http://consul:8500
     depends_on:
@@ -34,8 +38,12 @@ services:
         condition: service_started
 
   product-service:
+    container_name: product-service
     build: ./services/product
+    ports:
+      - "8000:8000"
     environment:
+      - HOST=product-service
       - DB_HOST=postgres
       - CONSUL_HTTP_ADDR=http://consul:8500
     depends_on:
@@ -45,8 +53,12 @@ services:
         condition: service_started
 
   order-service:
+    container_name: order-service
     build: ./services/order
+    ports:
+      - "8001:8001"
     environment:
+      - HOST=order-service
       - DB_HOST=postgres
       - CONSUL_HTTP_ADDR=http://consul:8500
     depends_on:
@@ -56,8 +68,12 @@ services:
         condition: service_started
 
   payment-service:
+    container_name: payment-service
     build: ./services/payment
+    ports:
+      - "8004:8004"
     environment:
+      - HOST=payment-service
       - DB_HOST=postgres
       - CONSUL_HTTP_ADDR=http://consul:8500
     depends_on:
@@ -67,8 +83,12 @@ services:
         condition: service_started
 
   inventory-service:
+    container_name: inventory-service
     build: ./services/inventory
+    ports:
+      - "8006:8006"
     environment:
+      - HOST=inventory-service
       - DB_HOST=postgres
       - CONSUL_HTTP_ADDR=http://consul:8500
     depends_on:
@@ -78,6 +98,7 @@ services:
         condition: service_started
 
   gateway:
+    container_name: gateway
     build: ./gateway
     ports:
       - "8081:8081"
@@ -91,5 +112,20 @@ services:
       - payment-service
       - inventory-service
 
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+
 volumes:
   postgres_data:
+  redis_data:
